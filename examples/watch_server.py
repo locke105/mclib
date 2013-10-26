@@ -52,7 +52,7 @@ def main():
                                 port=opts.port)
         clear()
         pprint.pprint(info)
-        time.sleep(2)
+        time.sleep(opts.interval)
 
 if __name__ == '__main__':
     parse_args()
