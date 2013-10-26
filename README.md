@@ -8,9 +8,9 @@ Installing
 
 Currently the only way to install mclib is from source
 
- git clone https://github.com/locke105/mclib.git
- cd mclib
- python setup.py install
+    git clone https://github.com/locke105/mclib.git
+    cd mclib
+    python setup.py install
 
 License and Authors
 ===================
