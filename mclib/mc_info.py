@@ -49,40 +49,44 @@ class MC16(object):
         return pack('>h', len(string)) + string.encode('utf-16be')
 
     def get_info(self, host='localhost', port=25565):
-        #Set up our socket
+        # Set up our socket
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(10) # seconds
         s.connect((host, port))
 
-        #Send 0xFE: Server list ping
+        # Send 0xFE: Server list ping
         s.send('\xfe\x01')
 
-        #Send 0xFA: Plugin message
+        # Send 0xFA: Plugin message
         s.send('\xfa')                           # ident
         s.send(self.pack_string('MC|PingHost'))  # message identifier
         s.send(pack('>h', 7 + 2*len(host)))      # payload length
-        s.send(pack('b', 127))                   # protocol version
+        s.send(pack('b', 78))                    # protocol version
         s.send(self.pack_string(host))           # hostname
         s.send(pack('>i', port))                 # port
 
-        #Done sending! Read some data and close the socket
+        # Done sending! Read some data and close the socket
         d = s.recv(1024)
+
+        # consume extra bytes to avoid server end of stream error
+        s.recv(1024)
         s.close()
 
-        #Check we've got a 0xFF Disconnect
+        # Check we've got a 0xFF Disconnect
         assert d[0] == '\xff'
 
-        #Remove the packet ident (0xFF) and the
-        #short containing the length of the string
-        #Decode UCS-2 string
+        # Remove the packet ident (0xFF) and the
+        # short containing the length of the string
+        # Decode UCS-2 string
         d = d[3:].decode('utf-16be')
 
-        #Check the first 3 characters of the string are what we expect
+        # Check the first 3 characters of the string are what we expect
         assert d[:3] == u'\xa7\x31\x00'
 
-        #Split
+        # Split
         d = d[3:].split('\x00')
 
-        #Return a dict of values
+        # Return a dict of values
         return {'protocol_version': int(d[0]),
                 'server_version':       d[1],
                 'motd':                 d[2],
