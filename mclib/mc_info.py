@@ -17,6 +17,7 @@
 # parts of this were re-used from
 # https://gist.github.com/barneygale/1209061
 
+from contextlib import contextmanager
 from cStringIO import StringIO
 import json
 import logging
@@ -30,37 +31,6 @@ LOG = logging.getLogger(__name__)
 
 def get_info(host='localhost', port=25565):
     return MCServer(host=host, port=port).get_info()
-
-
-# Strings in the minecraft protocol are encoded as big-endian UCS-2,
-# prefixed with a short giving its length in characters.
-def pack_string(string):
-    return struct.pack('>h', len(string)) + string.encode('utf-16be')
-
-
-# shared socket connect functionality
-def _get_info(host, port, protocol):
-    # Set up our socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(20) # seconds
-    s.connect((host, port))
-
-    s.sendall(protocol._get_message(host, port))
-
-    data = StringIO()
-    got_bytes = True
-    while got_bytes:
-        in_bytes = s.recv(1024)
-        if len(in_bytes) > 0:
-            data.write(in_bytes)
-        else:
-            got_bytes = False
-
-    s.shutdown(socket.SHUT_RDWR)
-    s.close()
-
-    info = protocol.parse_resp(data.getvalue())
-    return info
 
 
 class MCServer(object):
@@ -84,6 +54,19 @@ class MCServer(object):
                 LOG.info(traceback.format_exc())
 
 
+@contextmanager
+def open_socket(host, port):
+    # Set up our socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(20) # seconds
+    s.connect((host, port))
+
+    yield s
+
+    s.shutdown(socket.SHUT_RDWR)
+    s.close()
+
+
 class MC15(object):
 
     def _get_message(self, host, port):
@@ -91,7 +74,20 @@ class MC15(object):
         return '\xfe\x01'
 
     def get_info(self, host='localhost', port=25565):
-        return _get_info(host, port, self)
+        with open_socket(host, port) as s:
+            s.sendall(protocol._get_message(host, port))
+
+            data = StringIO()
+            got_bytes = True
+            while got_bytes:
+                in_bytes = s.recv(1024)
+                if len(in_bytes) > 0:
+                    data.write(in_bytes)
+                else:
+                    got_bytes = False
+
+        info = protocol.parse_resp(data.getvalue())
+        return info
 
     def parse_resp(self, d):
         # Check we've got a 0xFF Disconnect
@@ -118,6 +114,11 @@ class MC15(object):
 
 class MC16(MC15):
 
+    # Strings in the minecraft protocol are encoded as big-endian UCS-2,
+    # prefixed with a short giving its length in characters.
+    def pack_string(self, string):
+        return struct.pack('>h', len(string)) + string.encode('utf-16be')
+
     def _get_message(self, host, port):
         msg = StringIO()
 
@@ -126,13 +127,14 @@ class MC16(MC15):
 
         # Send 0xFA: Plugin message
         msg.write('\xfa')                           # ident
-        msg.write(struct.pack_string('MC|PingHost'))       # message identifier
+        msg.write(self.pack_string('MC|PingHost'))       # message identifier
         msg.write(struct.pack('>h', 7 + 2*len(host)))      # payload length
         msg.write(struct.pack('b', 78))                    # protocol version
-        msg.write(struct.pack_string(host))                # hostname
+        msg.write(self.pack_string(host))                # hostname
         msg.write(struct.pack('>i', port))                 # port
 
         return msg.getvalue()
+
 
 class MC17(object):
 
@@ -162,29 +164,21 @@ class MC17(object):
         return struct.pack('>H', i)
 
     def get_info(self, host='localhost', port=25565):
+        with open_socket(host, port) as s:
+            # Send handshake + status request
+            s.send(self.pack_data("\x00\x00" +
+                                  self.pack_data(host.encode('utf8')) +
+                                  self.pack_port(port) + "\x01"))
+            s.send(self.pack_data("\x00"))
 
-        # Connect
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((host, port))
+            # Read response
+            self.unpack_varint(s)     # Packet length
+            self.unpack_varint(s)     # Packet ID
+            l = self.unpack_varint(s) # String length
 
-        # Send handshake + status request
-        s.send(self.pack_data("\x00\x00" +
-               self.pack_data(host.encode('utf8')) +
-               self.pack_port(port) + "\x01"))
-        s.send(self.pack_data("\x00"))
-
-        # Read response
-        self.unpack_varint(s)     # Packet length
-        self.unpack_varint(s)     # Packet ID
-        l = self.unpack_varint(s) # String length
-
-        d = ""
-        while len(d) < l:
-            d += s.recv(1024)
-
-        # Close our socket
-        s.shutdown(socket.SHUT_RDWR)
-        s.close()
+            d = ""
+            while len(d) < l:
+                d += s.recv(1024)
 
         # Load json and return
         return json.loads(d.decode('utf8'))
