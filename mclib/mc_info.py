@@ -17,10 +17,11 @@
 # parts of this were re-used from
 # https://gist.github.com/barneygale/1209061
 
+from cStringIO import StringIO
+import json
 import logging
 import socket
-from cStringIO import StringIO
-from struct import pack
+import struct
 import traceback
 
 logging.basicConfig()
@@ -34,7 +35,7 @@ def get_info(host='localhost', port=25565):
 # Strings in the minecraft protocol are encoded as big-endian UCS-2,
 # prefixed with a short giving its length in characters.
 def pack_string(string):
-    return pack('>h', len(string)) + string.encode('utf-16be')
+    return struct.pack('>h', len(string)) + string.encode('utf-16be')
 
 
 # shared socket connect functionality
@@ -68,7 +69,7 @@ class MCServer(object):
         self.host = host
         self.port = port
         if protocols is None:
-            self.protocols = ['MC16', 'MC15']
+            self.protocols = ['MC17', 'MC16', 'MC15']
         else:
             self.protocols = protocols
 
@@ -77,7 +78,7 @@ class MCServer(object):
             klass = globals()[protocol]
             protocol_cls = klass()
             try:
-                return _get_info(self.host, self.port, protocol_cls)
+                return protocol_cls.get_info(self.host, self.port)
             except Exception:
                 LOG.warn("Failed to get_info with protocol %s" % protocol)
                 LOG.info(traceback.format_exc())
@@ -125,10 +126,65 @@ class MC16(MC15):
 
         # Send 0xFA: Plugin message
         msg.write('\xfa')                           # ident
-        msg.write(pack_string('MC|PingHost'))       # message identifier
-        msg.write(pack('>h', 7 + 2*len(host)))      # payload length
-        msg.write(pack('b', 78))                    # protocol version
-        msg.write(pack_string(host))                # hostname
-        msg.write(pack('>i', port))                 # port
+        msg.write(struct.pack_string('MC|PingHost'))       # message identifier
+        msg.write(struct.pack('>h', 7 + 2*len(host)))      # payload length
+        msg.write(struct.pack('b', 78))                    # protocol version
+        msg.write(struct.pack_string(host))                # hostname
+        msg.write(struct.pack('>i', port))                 # port
 
         return msg.getvalue()
+
+class MC17(object):
+
+    def unpack_varint(self, s):
+        d = 0
+        for i in range(5):
+            b = ord(s.recv(1))
+            d |= (b & 0x7F) << 7*i
+            if not b & 0x80:
+                break
+        return d
+
+    def pack_varint(self, d):
+        o = ""
+        while True:
+            b = d & 0x7F
+            d >>= 7
+            o += struct.pack("B", b | (0x80 if d > 0 else 0))
+            if d == 0:
+                break
+        return o
+
+    def pack_data(self, d):
+        return self.pack_varint(len(d)) + d
+
+    def pack_port(self, i):
+        return struct.pack('>H', i)
+
+    def get_info(self, host='localhost', port=25565):
+
+        # Connect
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((host, port))
+
+        # Send handshake + status request
+        s.send(self.pack_data("\x00\x00" +
+               self.pack_data(host.encode('utf8')) +
+               self.pack_port(port) + "\x01"))
+        s.send(self.pack_data("\x00"))
+
+        # Read response
+        self.unpack_varint(s)     # Packet length
+        self.unpack_varint(s)     # Packet ID
+        l = self.unpack_varint(s) # String length
+
+        d = ""
+        while len(d) < l:
+            d += s.recv(1024)
+
+        # Close our socket
+        s.shutdown(socket.SHUT_RDWR)
+        s.close()
+
+        # Load json and return
+        return json.loads(d.decode('utf8'))
